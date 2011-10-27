@@ -261,7 +261,7 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     char path[STRING_SIZE];
     char newfile[STRING_SIZE];
     char buf[CHUNK_SIZE];
-    int qty = 0;
+    size_t qty = 0;
     FILE * in, *out;
     sprintf(path,"%s/%s",TOP_DIR,op->operand);
     in = fopen(path,"rb");
@@ -309,11 +309,11 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
         return;
     }
     qty = fwrite(buf,bytes,1,out);
-    if(qty > 0) total_bytes_copied += qty;
-    LOG(DCOPY_LOG_DBG,"Wrote %ld bytes (%ld total).",bytes,total_bytes_copied);
-    char *newop = encode_operation(CHECKSUM,op->chunk,0,op->operand);
-    handle->enqueue(newop);
-    free(newop);
+    total_bytes_copied += bytes;
+    LOG(DCOPY_LOG_DBG,"Wrote %zd bytes (%zd total).",bytes,total_bytes_copied);
+//    char *newop = encode_operation(CHECKSUM,op->chunk,0,op->operand);
+  //  handle->enqueue(newop);
+    //free(newop);
     fclose(in);
     fclose(out);
     return;
@@ -434,7 +434,7 @@ main (int argc, char **argv)
         LOG(DCOPY_LOG_INFO, "Filecopy run started at: %s", starttime_str);
         LOG(DCOPY_LOG_INFO, "Filecopy run completed at: %s", endtime_str);
         LOG(DCOPY_LOG_INFO, "Filecopy total time (seconds) for this run: %f",difftime(time_finished,time_started));
-        LOG(DCOPY_LOG_INFO, "Transfer rate: %ld bytes in %lf seconds.",total_bytes_copied,end);
+        LOG(DCOPY_LOG_INFO, "Transfer rate: %zd bytes in %lf seconds.",total_bytes_copied,end);
     exit(EXIT_SUCCESS);
 }
 
