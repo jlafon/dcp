@@ -12,6 +12,7 @@
 #include <libcircle.h>
 #include <mpi.h>
 #include "log.h"
+#define STRING_SIZE 4096
 #define CHUNK_SIZE 4194304
 FILE           *DCOPY_debug_stream;
 DCOPY_loglevel DCOPY_debug_level;
@@ -19,14 +20,16 @@ int             CIRCLE_global_rank;
 char           *TOP_DIR;
 int             TOP_DIR_LEN;
 char           *DEST_DIR;
-typedef enum { COPY,CHECKSUM,STAT } operation_code_t;
-char  *op_string_table[] = { "COPY", "CHECKSUM", "STAT" };
+typedef enum { COPY,CHECKSUM,STAT,SETATTR } operation_code_t;
+char  *op_string_table[] = { "COPY", "CHECKSUM", "STAT", "SETATTR" };
+
 typedef struct 
 {
    operation_code_t code;
    int chunk;
    char * operand;
 } operation_t;
+
 time_t time_started;
 time_t time_finished;
 size_t total_bytes_copied;
@@ -35,7 +38,7 @@ void (*jump_table[4])(operation_t * op,CIRCLE_handle *handle);
 char * 
 encode_operation(operation_code_t op, int chunk,char * operand)
 {
-    char * result = (char *) malloc(sizeof(char)*4096);
+    char * result = (char *) malloc(sizeof(char)*STRING_SIZE);
     sprintf(result,"%d:%d:%s",chunk, op,operand);
     return result;
 }
@@ -44,7 +47,7 @@ void
 do_checksum(operation_t * op, CIRCLE_handle * handle)
 {
     LOG(DCOPY_LOG_DBG,"Checksum %s chunk %d",op->operand, op->chunk);
-    char path[4096];
+    char path[STRING_SIZE];
     sprintf(path,"%s/%s",TOP_DIR,op->operand);
     FILE * old = fopen(path,"rb");
     if(!old)
@@ -52,7 +55,7 @@ do_checksum(operation_t * op, CIRCLE_handle * handle)
         LOG(DCOPY_LOG_ERR,"Unable to open file %s",path);
         return;
     }
-    char newfile[4096];
+    char newfile[STRING_SIZE];
     void * newbuf = (void*) malloc(CHUNK_SIZE);
     void * oldbuf = (void*) malloc(CHUNK_SIZE);
     sprintf(newfile,"%s/%s",DEST_DIR,op->operand);
@@ -85,13 +88,15 @@ do_checksum(operation_t * op, CIRCLE_handle * handle)
     free(oldbuf);
     return;
 }
+
+    
 void 
 process_dir(char * dir, CIRCLE_handle *handle)
 {
     DIR *current_dir;
-    char parent[2048];
+    char parent[STRING_SIZE];
     struct dirent *current_ent;
-    char path[4096];
+    char path[STRING_SIZE];
     int is_top_dir = !strcmp(dir,TOP_DIR);
     if(is_top_dir)
         sprintf(path,"%s",dir);
@@ -129,15 +134,56 @@ process_dir(char * dir, CIRCLE_handle *handle)
     closedir(current_dir);
     return;
 }
+
+void
+do_setattr(operation_t * op, CIRCLE_handle * handle)
+{
+    static struct stat st;
+    static int status;
+    int is_top_dir = !strcmp(op->operand,TOP_DIR);
+    char path[STRING_SIZE];
+    char destpath[STRING_SIZE];
+    if(is_top_dir)
+        sprintf(path,"%s",TOP_DIR);
+    else
+        sprintf(path,"%s/%s",TOP_DIR,op->operand);
+    status = lstat(path, &st);
+    if(status != EXIT_SUCCESS)
+    {
+        LOG(DCOPY_LOG_ERR,"Unable to stat \"%s\"",path);
+        perror("stat");
+    }
+    LOG(DCOPY_LOG_DBG,"Operand: %s Dir: %s",op->operand,DEST_DIR);
+    if(is_top_dir)
+    {
+        if(chmod(op->operand,st.st_mode) != 0)
+        {
+            LOG(DCOPY_LOG_ERR,"Unable to chmod %s to %d",op->operand,st.st_mode);
+            perror("chmod");
+        }
+    }
+    else
+    {
+        sprintf(destpath,"%s/%s",DEST_DIR,op->operand);
+        if(chmod(destpath,st.st_mode) != 0)
+        {
+            LOG(DCOPY_LOG_ERR,"Unable to chmod %s to %d",destpath,st.st_mode);
+            perror("chmod");
+        }
+        LOG(DCOPY_LOG_DBG,"Chmod'd %s to %d",destpath,st.st_mode);
+    }
+    return;
+}
+
 void
 do_stat(operation_t * op, CIRCLE_handle * handle)
 {
     static struct stat st;
     static int status;
     int is_top_dir = !strcmp(op->operand,TOP_DIR);
-    char path[4096];
+    char path[STRING_SIZE];
     if(is_top_dir)
-        sprintf(path,"%s",TOP_DIR,op->operand);
+        sprintf(path,"%s",TOP_DIR);
     else
         sprintf(path,"%s/%s",TOP_DIR,op->operand);
     status = lstat(path, &st);
@@ -174,6 +220,8 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
           {
              char *newop = encode_operation(COPY,i,op->operand);
              handle->enqueue(newop);
+             char *attrop = encode_operation(SETATTR,0,op->operand);
+             handle->enqueue(attrop);
              free(newop);
           }
     }
@@ -184,21 +232,22 @@ void
 do_copy(operation_t * op, CIRCLE_handle * handle)
 {
     LOG(DCOPY_LOG_DBG,"Copy %s chunk %d",op->operand, op->chunk);
-    char path[4096];
+    char path[STRING_SIZE];
+    char newfile[STRING_SIZE];
+    char buf[CHUNK_SIZE];
+    int qty = 0;
+    FILE * in, *out;
     sprintf(path,"%s/%s",TOP_DIR,op->operand);
-    FILE * in = fopen(path,"rb");
+    in = fopen(path,"rb");
     if(!in)
     {
         LOG(DCOPY_LOG_ERR,"Unable to open %s",path);
         perror("open");
         return;
     }
-    char newfile[4096];
-    char buf[CHUNK_SIZE];
-//    void * buf = (void*) malloc(CHUNK_SIZE);
     sprintf(newfile,"%s/%s",DEST_DIR,op->operand);
-    int outfd = open(newfile,O_RDWR | O_CREAT);
-    if(!outfd)
+    out = fopen(newfile,"rb+");
+    if(!out)
     {
         LOG(DCOPY_LOG_ERR,"Unable to open %s",newfile);
         return;
@@ -217,15 +266,20 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
         return;
     }
     LOG(DCOPY_LOG_DBG,"Read %ld bytes.",bytes);
-    lseek(outfd,CHUNK_SIZE*op->chunk,SEEK_SET);
-    int qty = write(outfd,buf,bytes);
+    if(fseek(out,CHUNK_SIZE*op->chunk,SEEK_SET) != 0)
+    {
+        LOG(DCOPY_LOG_ERR,"Unable to seek to %d in %s",CHUNK_SIZE*op->chunk,newfile);
+        perror("fseek");
+        return;
+    }
+    qty = fwrite(buf,bytes,1,out);
     if(qty > 0) total_bytes_copied += qty;
     LOG(DCOPY_LOG_DBG,"Wrote %ld bytes (%ld total).",bytes,total_bytes_copied);
     char *newop = encode_operation(CHECKSUM,op->chunk,op->operand);
     handle->enqueue(newop);
     free(newop);
     fclose(in);
-    close(outfd);
+    fclose(out);
     return;
 }
 
@@ -233,7 +287,7 @@ operation_t *
 decode_operation(char * op)
 {
     operation_t * ret = (operation_t*) malloc(sizeof(operation_t));
-    ret->operand = (char*) malloc(sizeof(char)*4096);
+    ret->operand = (char*) malloc(sizeof(char)*STRING_SIZE);
     ret->chunk = atoi(strtok(op,":"));
     ret->code = atoi(strtok(NULL,":"));
     ret->operand = strtok(NULL,":"); 
@@ -269,12 +323,12 @@ process_objects(CIRCLE_handle *handle)
 int
 main (int argc, char **argv)
 {
-    int index;
     int c;
 
     jump_table[0] = do_copy;
     jump_table[1] = do_checksum;
     jump_table[2] = do_stat;
+    jump_table[3] = do_setattr;
     total_bytes_copied = 0.0;
     
     DCOPY_debug_stream = stdout;
@@ -333,7 +387,6 @@ main (int argc, char **argv)
     CIRCLE_begin();
     double end = MPI_Wtime() - start;
     CIRCLE_finalize();
-    double rate = total_bytes_copied/end;
     time(&time_finished);
     char starttime_str[256];
     char endtime_str[256];

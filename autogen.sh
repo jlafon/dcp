@@ -87,6 +87,8 @@ set -x
 rm -f ./config.h.in
 rm -f ./aclocal.m4
 rm -rf ./autom4te*.cache
+rm -rf ./m4
+mkdir ./m4
 aclocal -I m4 -I auxdir $ACLOCAL_FLAGS || exit 1
 libtoolize --automake --copy --force || exit 1
 autoheader || exit 1
