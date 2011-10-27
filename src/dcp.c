@@ -286,7 +286,10 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
         if(lstat(path, &st) != 0)
             perror("Stat");
         else
+        {
             chmod(newfile,st.st_mode);
+            chown(newfile,st.st_uid,st.st_gid);
+        }
     }
     if(fseek(in,CHUNK_SIZE*op->chunk,SEEK_SET) != 0)
     {
@@ -434,7 +437,7 @@ main (int argc, char **argv)
         LOG(DCOPY_LOG_INFO, "Filecopy run started at: %s", starttime_str);
         LOG(DCOPY_LOG_INFO, "Filecopy run completed at: %s", endtime_str);
         LOG(DCOPY_LOG_INFO, "Filecopy total time (seconds) for this run: %f",difftime(time_finished,time_started));
-        LOG(DCOPY_LOG_INFO, "Transfer rate: %zd bytes in %lf seconds.",total_bytes_copied,end);
+        LOG(DCOPY_LOG_INFO, "Transfer rate: %zd bytes in %lf seconds (%f MB/s).",total_bytes_copied,end,(float)total_bytes_copied/(float)end/1024.0/1024.0);
     exit(EXIT_SUCCESS);
 }
 
