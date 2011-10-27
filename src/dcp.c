@@ -12,6 +12,7 @@
 #include <libcircle.h>
 #include <mpi.h>
 #include "log.h"
+#define MAX_TRIES 50
 #define STRING_SIZE 4096
 #define CHUNK_SIZE 4194304
 FILE           *DCOPY_debug_stream;
@@ -27,6 +28,7 @@ typedef struct
 {
    operation_code_t code;
    int chunk;
+   int tries;
    char * operand;
 } operation_t;
 
@@ -36,10 +38,10 @@ size_t total_bytes_copied;
 void (*jump_table[4])(operation_t * op,CIRCLE_handle *handle);
 
 char * 
-encode_operation(operation_code_t op, int chunk,char * operand)
+encode_operation(operation_code_t op, int chunk,int tries, char * operand)
 {
     char * result = (char *) malloc(sizeof(char)*STRING_SIZE);
-    sprintf(result,"%d:%d:%s",chunk, op,operand);
+    sprintf(result,"%d:%d:%d:%s",chunk, op,tries,operand);
     return result;
 }
 
@@ -53,6 +55,7 @@ do_checksum(operation_t * op, CIRCLE_handle * handle)
     if(!old)
     {
         LOG(DCOPY_LOG_ERR,"Unable to open file %s",path);
+        perror("checksum");
         return;
     }
     char newfile[STRING_SIZE];
@@ -64,8 +67,10 @@ do_checksum(operation_t * op, CIRCLE_handle * handle)
     {
         LOG(DCOPY_LOG_ERR,"Unable to open file %s",newfile);
         perror("checksum open");
-        char *newop = encode_operation(CHECKSUM,op->chunk,op->operand);
-        handle->enqueue(newop);
+        op->tries = op->tries + 1;
+        char *newop = encode_operation(CHECKSUM,op->chunk,op->tries,op->operand);
+        if(op->tries <= MAX_TRIES)
+            handle->enqueue(newop);
         free(newop);
         return;
     }
@@ -76,14 +81,14 @@ do_checksum(operation_t * op, CIRCLE_handle * handle)
     if(newbytes != oldbytes || memcmp(newbuf,oldbuf,newbytes) != 0)
     {
         LOG(DCOPY_LOG_ERR,"Incorrect checksum, requeueing file (%s).",op->operand);
-        char *newop = encode_operation(STAT,0,op->operand);
+        char *newop = encode_operation(STAT,0,0,op->operand);
         handle->enqueue(newop);
         free(newop);
     }
     else
         LOG(DCOPY_LOG_DBG,"File (%s) chunk %d OK.",newfile,op->chunk);
-    fclose(new);
-    fclose(old);
+    if(new) fclose(new);
+    if(old) fclose(old);
     free(newbuf);
     free(oldbuf);
     return;
@@ -125,7 +130,7 @@ process_dir(char * dir, CIRCLE_handle *handle)
                 strcat(parent,"/");
                 strcat(parent,current_ent->d_name);
                 LOG(DCOPY_LOG_DBG, "Pushing [%s] <- [%s]", parent, dir);
-                char *newop = encode_operation(STAT,0,parent);
+                char *newop = encode_operation(STAT,0,0,parent);
                 handle->enqueue(newop);
                 free(newop);
             }
@@ -152,6 +157,13 @@ do_setattr(operation_t * op, CIRCLE_handle * handle)
     {
         LOG(DCOPY_LOG_ERR,"Unable to stat \"%s\"",path);
         perror("stat");
+        op->tries = op->tries + 1;
+        if(op->tries <= MAX_TRIES)
+        {
+            char *newop = encode_operation(SETATTR,0,op->tries,op->operand);
+            handle->enqueue(newop);
+        }
+        return;
     }
     LOG(DCOPY_LOG_DBG,"Operand: %s Dir: %s",op->operand,DEST_DIR);
     if(is_top_dir)
@@ -159,6 +171,12 @@ do_setattr(operation_t * op, CIRCLE_handle * handle)
         if(chmod(op->operand,st.st_mode) != 0)
         {
             LOG(DCOPY_LOG_ERR,"Unable to chmod %s to %d",op->operand,st.st_mode);
+            op->tries = op->tries + 1;
+            if(op->tries <= MAX_TRIES)
+            {
+                char *newop = encode_operation(SETATTR,0,op->tries,op->operand);
+                handle->enqueue(newop);
+            }
             perror("chmod");
         }
     }
@@ -168,6 +186,12 @@ do_setattr(operation_t * op, CIRCLE_handle * handle)
         if(chmod(destpath,st.st_mode) != 0)
         {
             LOG(DCOPY_LOG_ERR,"Unable to chmod %s to %d",destpath,st.st_mode);
+            op->tries = op->tries + 1;
+            if(op->tries <= MAX_TRIES)
+            {
+                char *newop = encode_operation(SETATTR,0,op->tries,op->operand);
+                handle->enqueue(newop);
+            }
             perror("chmod");
         }
         LOG(DCOPY_LOG_DBG,"Chmod'd %s to %d",destpath,st.st_mode);
@@ -202,7 +226,9 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
               sprintf(dir,"mkdir -p %s/%s",DEST_DIR,op->operand);
           LOG(DCOPY_LOG_DBG,"Creating %s",dir);
           FILE * p = popen(dir,"r");
-          pclose(p);
+          if(!p) perror("Unable to mkdir");
+          else
+              pclose(p);
           process_dir(op->operand,handle);
     }
     else
@@ -212,16 +238,16 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
           int i = 0;
           for(i = 0; i < num_chunks; i++)
           {
-             char *newop = encode_operation(COPY,i,op->operand);
+             char *newop = encode_operation(COPY,i,0,op->operand);
              handle->enqueue(newop);
              free(newop);
           }
           if(num_chunks*CHUNK_SIZE < st.st_size)
           {
-             char *newop = encode_operation(COPY,i,op->operand);
+             char *newop = encode_operation(COPY,i,0,op->operand);
              handle->enqueue(newop);
-             char *attrop = encode_operation(SETATTR,0,op->operand);
-             handle->enqueue(attrop);
+//             char *attrop = encode_operation(SETATTR,0,0,op->operand);
+  //           handle->enqueue(attrop);
              free(newop);
           }
     }
@@ -249,8 +275,18 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     out = fopen(newfile,"rb+");
     if(!out)
     {
-        LOG(DCOPY_LOG_ERR,"Unable to open %s",newfile);
-        return;
+        out = fopen(newfile, "w");
+        if(!out)
+        {
+            LOG(DCOPY_LOG_ERR,"Unable to open %s",newfile);
+            perror("destination");
+            return;
+        }
+        struct stat st;
+        if(lstat(path, &st) != 0)
+            perror("Stat");
+        else
+            chmod(newfile,st.st_mode);
     }
     if(fseek(in,CHUNK_SIZE*op->chunk,SEEK_SET) != 0)
     {
@@ -275,7 +311,7 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     qty = fwrite(buf,bytes,1,out);
     if(qty > 0) total_bytes_copied += qty;
     LOG(DCOPY_LOG_DBG,"Wrote %ld bytes (%ld total).",bytes,total_bytes_copied);
-    char *newop = encode_operation(CHECKSUM,op->chunk,op->operand);
+    char *newop = encode_operation(CHECKSUM,op->chunk,0,op->operand);
     handle->enqueue(newop);
     free(newop);
     fclose(in);
@@ -290,6 +326,7 @@ decode_operation(char * op)
     ret->operand = (char*) malloc(sizeof(char)*STRING_SIZE);
     ret->chunk = atoi(strtok(op,":"));
     ret->code = atoi(strtok(NULL,":"));
+    ret->tries = atoi(strtok(NULL,":"));
     ret->operand = strtok(NULL,":"); 
     return ret;
 }
@@ -298,7 +335,7 @@ void
 add_objects(CIRCLE_handle *handle)
 {
     TOP_DIR_LEN = strlen(TOP_DIR);
-    char * op = encode_operation(STAT,0,TOP_DIR);
+    char * op = encode_operation(STAT,0,0,TOP_DIR);
     handle->enqueue(op);
     free(op);
 }
