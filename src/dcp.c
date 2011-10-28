@@ -14,7 +14,7 @@
 #include "log.h"
 #define MAX_TRIES 50
 #define STRING_SIZE 4096
-#define CHUNK_SIZE 4194304
+#define CHUNK_SIZE 33554432 // 32 MB
 FILE           *DCOPY_debug_stream;
 DCOPY_loglevel DCOPY_debug_level;
 int             CIRCLE_global_rank;
@@ -205,7 +205,8 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
     static struct stat st;
     static int status;
     int is_top_dir = !strcmp(op->operand,TOP_DIR);
-    char path[STRING_SIZE];
+    static char path[STRING_SIZE];
+    FILE * temp;
     if(is_top_dir)
         sprintf(path,"%s",TOP_DIR);
     else
@@ -233,6 +234,11 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
     }
     else
     {
+          sprintf(path,"%s/%s",DEST_DIR,op->operand);
+          temp = fopen(path,"w");
+          fclose(temp);
+          chmod(path,st.st_mode);
+          chown(path,st.st_uid,st.st_gid);
           int num_chunks = st.st_size / CHUNK_SIZE;
           LOG(DCOPY_LOG_DBG,"File size: %ld Chunks:%d Total: %d",st.st_size,num_chunks,num_chunks*CHUNK_SIZE);
           int i = 0;
@@ -246,8 +252,6 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
           {
              char *newop = encode_operation(COPY,i,0,op->operand);
              handle->enqueue(newop);
-//             char *attrop = encode_operation(SETATTR,0,0,op->operand);
-  //           handle->enqueue(attrop);
              free(newop);
           }
     }
@@ -275,20 +279,13 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     out = fopen(newfile,"rb+");
     if(!out)
     {
+        LOG(DCOPY_LOG_WARN,"Warning: file (%s) doesn't have attributes set.",newfile);
         out = fopen(newfile, "w");
         if(!out)
         {
             LOG(DCOPY_LOG_ERR,"Unable to open %s",newfile);
             perror("destination");
             return;
-        }
-        struct stat st;
-        if(lstat(path, &st) != 0)
-            perror("Stat");
-        else
-        {
-            chmod(newfile,st.st_mode);
-            chown(newfile,st.st_uid,st.st_gid);
         }
     }
     if(fseek(in,CHUNK_SIZE*op->chunk,SEEK_SET) != 0)
@@ -314,9 +311,6 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     qty = fwrite(buf,bytes,1,out);
     total_bytes_copied += bytes;
     LOG(DCOPY_LOG_DBG,"Wrote %zd bytes (%zd total).",bytes,total_bytes_copied);
-//    char *newop = encode_operation(CHECKSUM,op->chunk,0,op->operand);
-  //  handle->enqueue(newop);
-    //free(newop);
     fclose(in);
     fclose(out);
     return;
