@@ -11,6 +11,7 @@
 #include <time.h>
 #include <libcircle.h>
 #include <mpi.h>
+#include <pan_fs_client_cw_mode.h>
 #include "log.h"
 #define MAX_TRIES 50
 #define STRING_SIZE 4096
@@ -206,7 +207,7 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
     static int status;
     int is_top_dir = !strcmp(op->operand,TOP_DIR);
     static char path[STRING_SIZE];
-    FILE * temp;
+    int temp;
     if(is_top_dir)
         sprintf(path,"%s",TOP_DIR);
     else
@@ -235,24 +236,32 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
     else
     {
           sprintf(path,"%s/%s",DEST_DIR,op->operand);
-          temp = fopen(path,"w");
-          fclose(temp);
-          chmod(path,st.st_mode);
-          chown(path,st.st_uid,st.st_gid);
+          temp = creat(path,st.st_mode);
+          //chmod(path,st.st_mode);
+          fchown(temp,st.st_uid,st.st_gid);
+          close(temp);
           int num_chunks = st.st_size / CHUNK_SIZE;
           LOG(DCOPY_LOG_DBG,"File size: %ld Chunks:%d Total: %d",st.st_size,num_chunks,num_chunks*CHUNK_SIZE);
           int i = 0;
-          for(i = 0; i < num_chunks; i++)
+          if(num_chunks == 0)
           {
-             char *newop = encode_operation(COPY,i,0,op->operand);
-             handle->enqueue(newop);
-             free(newop);
+             // For a single chunk, just copy it.
+             do_copy(op,handle);  
           }
-          if(num_chunks*CHUNK_SIZE < st.st_size)
+          else
           {
-             char *newop = encode_operation(COPY,i,0,op->operand);
-             handle->enqueue(newop);
-             free(newop);
+              for(i = 0; i < num_chunks; i++)
+              {
+                 char *newop = encode_operation(COPY,i,0,op->operand);
+                 handle->enqueue(newop);
+                 free(newop);
+              }
+              if(num_chunks*CHUNK_SIZE < st.st_size)
+              {
+                 char *newop = encode_operation(COPY,i,0,op->operand);
+                 handle->enqueue(newop);
+                 free(newop);
+              }
           }
     }
     return;
@@ -266,7 +275,8 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     char newfile[STRING_SIZE];
     char buf[CHUNK_SIZE];
     size_t qty = 0;
-    FILE * in, *out;
+    FILE * in;//, *out;
+    int out;
     sprintf(path,"%s/%s",TOP_DIR,op->operand);
     in = fopen(path,"rb");
     if(!in)
@@ -276,15 +286,17 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
         return;
     }
     sprintf(newfile,"%s/%s",DEST_DIR,op->operand);
-    out = fopen(newfile,"rb+");
+    //out = fopen(newfile,"rb+");
+    out = open(newfile,O_CREAT | O_WRONLY | O_CONCURRENT_WRITE);
     if(!out)
     {
         LOG(DCOPY_LOG_WARN,"Warning: file (%s) doesn't have attributes set.",newfile);
-        out = fopen(newfile, "w");
+        //out = fopen(newfile, "w");
         if(!out)
         {
             LOG(DCOPY_LOG_ERR,"Unable to open %s",newfile);
             perror("destination");
+            fclose(in);
             return;
         }
     }
@@ -292,27 +304,32 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     {
         LOG(DCOPY_LOG_ERR,"Couldn't seek %s",op->operand);
         perror("fseek");
+        fclose(in);
+        close(out);
         return;
     }
     size_t bytes = fread((void*)buf,1,CHUNK_SIZE,in);
-    if(bytes <= 0)
+    if((int)bytes == 0 && ferror(in))
     {
-        LOG(DCOPY_LOG_ERR,"Couldn't read %s",op->operand);
-        perror("fread");
+        LOG(DCOPY_LOG_ERR,"Warning: read %s (bytes = %zu)",op->operand,bytes);
+        fclose(in);
+        close(out);
         return;
     }
     LOG(DCOPY_LOG_DBG,"Read %ld bytes.",bytes);
-    if(fseek(out,CHUNK_SIZE*op->chunk,SEEK_SET) != 0)
+    if(lseek(out,(off_t)(CHUNK_SIZE*op->chunk),SEEK_SET) != (off_t) (CHUNK_SIZE*op->chunk))
     {
         LOG(DCOPY_LOG_ERR,"Unable to seek to %d in %s",CHUNK_SIZE*op->chunk,newfile);
-        perror("fseek");
+        perror("lseek");
+        fclose(in);
+        close(out);
         return;
     }
-    qty = fwrite(buf,bytes,1,out);
+    qty = write(out,buf,bytes);
     total_bytes_copied += bytes;
     LOG(DCOPY_LOG_DBG,"Wrote %zd bytes (%zd total).",bytes,total_bytes_copied);
     fclose(in);
-    fclose(out);
+    close(out);
     return;
 }
 
