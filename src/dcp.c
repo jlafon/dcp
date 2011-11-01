@@ -16,6 +16,7 @@
 #define MAX_TRIES 50
 #define STRING_SIZE 4096
 #define CHUNK_SIZE 33554432 // 32 MB
+
 FILE           *DCOPY_debug_stream;
 DCOPY_loglevel DCOPY_debug_level;
 int             CIRCLE_global_rank;
@@ -142,65 +143,6 @@ process_dir(char * dir, CIRCLE_handle *handle)
 }
 
 void
-do_setattr(operation_t * op, CIRCLE_handle * handle)
-{
-    static struct stat st;
-    static int status;
-    int is_top_dir = !strcmp(op->operand,TOP_DIR);
-    char path[STRING_SIZE];
-    char destpath[STRING_SIZE];
-    if(is_top_dir)
-        sprintf(path,"%s",TOP_DIR);
-    else
-        sprintf(path,"%s/%s",TOP_DIR,op->operand);
-    status = lstat(path, &st);
-    if(status != EXIT_SUCCESS)
-    {
-        LOG(DCOPY_LOG_ERR,"Unable to stat \"%s\"",path);
-        perror("stat");
-        op->tries = op->tries + 1;
-        if(op->tries <= MAX_TRIES)
-        {
-            char *newop = encode_operation(SETATTR,0,op->tries,op->operand);
-            handle->enqueue(newop);
-        }
-        return;
-    }
-    LOG(DCOPY_LOG_DBG,"Operand: %s Dir: %s",op->operand,DEST_DIR);
-    if(is_top_dir)
-    {
-        if(chmod(op->operand,st.st_mode) != 0)
-        {
-            LOG(DCOPY_LOG_ERR,"Unable to chmod %s to %d",op->operand,st.st_mode);
-            op->tries = op->tries + 1;
-            if(op->tries <= MAX_TRIES)
-            {
-                char *newop = encode_operation(SETATTR,0,op->tries,op->operand);
-                handle->enqueue(newop);
-            }
-            perror("chmod");
-        }
-    }
-    else
-    {
-        sprintf(destpath,"%s/%s",DEST_DIR,op->operand);
-        if(chmod(destpath,st.st_mode) != 0)
-        {
-            LOG(DCOPY_LOG_ERR,"Unable to chmod %s to %d",destpath,st.st_mode);
-            op->tries = op->tries + 1;
-            if(op->tries <= MAX_TRIES)
-            {
-                char *newop = encode_operation(SETATTR,0,op->tries,op->operand);
-                handle->enqueue(newop);
-            }
-            perror("chmod");
-        }
-        LOG(DCOPY_LOG_DBG,"Chmod'd %s to %d",destpath,st.st_mode);
-    }
-    return;
-}
-
-void
 do_stat(operation_t * op, CIRCLE_handle * handle)
 {
     static struct stat st;
@@ -231,14 +173,27 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
           if(!p) perror("Unable to mkdir");
           else
               pclose(p);
+          if(chown(dir,st.st_uid,st.st_gid) != EXIT_SUCCESS)
+          {
+              LOG(DCOPY_LOG_ERR,"Unable to chown (%s)",dir);
+              perror("chown");
+          }
           process_dir(op->operand,handle);
     }
     else
     {
           sprintf(path,"%s/%s",DEST_DIR,op->operand);
           temp = creat(path,st.st_mode);
-          //chmod(path,st.st_mode);
-          fchown(temp,st.st_uid,st.st_gid);
+          if(temp == -1)
+          {
+              LOG(DCOPY_LOG_ERR,"Unable to creat (%s)",path);
+              perror("creat");
+          }
+          if(fchown(temp,st.st_uid,st.st_gid) != EXIT_SUCCESS)
+          {
+              LOG(DCOPY_LOG_ERR,"Unable to fchown (%s)",path);
+              perror("fchown");
+          }
           close(temp);
           int num_chunks = st.st_size / CHUNK_SIZE;
           LOG(DCOPY_LOG_DBG,"File size: %ld Chunks:%d Total: %d",st.st_size,num_chunks,num_chunks*CHUNK_SIZE);
@@ -379,7 +334,6 @@ main (int argc, char **argv)
     jump_table[0] = do_copy;
     jump_table[1] = do_checksum;
     jump_table[2] = do_stat;
-    jump_table[3] = do_setattr;
     total_bytes_copied = 0.0;
     
     DCOPY_debug_stream = stdout;
