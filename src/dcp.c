@@ -12,22 +12,31 @@
 #include <time.h>
 #include <libcircle.h>
 #include <mpi.h>
-#include <pan_fs_client_cw_mode.h>
+
+#ifdef HAVE_PANFS_SDK
+    #include <pan_fs_client_cw_mode.h>
+    #define _OPEN_FLAGS O_CREAT | O_WRONLY | O_CONCURRENT_WRITE
+#else
+    #define _OPEN_FLAGS O_CREAT | O_WRONLY
+#endif
+
 #include "log.h"
+#ifdef HAVE_SPLICE
 #define SPLICE_F_MOVE 1 
+#endif
 #define MAX_TRIES 50
 #define STRING_SIZE 4096
 #define CHUNK_SIZE 33554432 // 32 MB
 #define _DEF_BUFSIZE 33554432
+
 FILE           *DCOPY_debug_stream;
 DCOPY_loglevel DCOPY_debug_level;
 int             CIRCLE_global_rank;
 char           *TOP_DIR;
 int             TOP_DIR_LEN;
 char           *DEST_DIR;
-typedef enum { COPY,CHECKSUM,STAT,SETATTR } operation_code_t;
-char  *op_string_table[] = { "COPY", "CHECKSUM", "STAT", "SETATTR" };
-
+typedef enum { COPY,CHECKSUM,STAT } operation_code_t;
+char  *op_string_table[] = { "COPY", "CHECKSUM", "STAT"};
 typedef struct 
 {
    operation_code_t code;
@@ -164,7 +173,7 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
     }
     else if(S_ISDIR(st.st_mode) && !(S_ISLNK(st.st_mode)))
     {
-          char dir[2048];
+          char dir[STRING_SIZE];
           LOG(DCOPY_LOG_DBG,"Operand: %s Dir: %s",op->operand,DEST_DIR);
           if(is_top_dir)
               sprintf(dir,"mkdir -p %s",op->operand);
@@ -223,6 +232,7 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
     }
     return;
 }
+#ifdef HAVE_SPLICE
 void
 do_splice_copy(operation_t * op, CIRCLE_handle * handle)
 {
@@ -243,7 +253,7 @@ do_splice_copy(operation_t * op, CIRCLE_handle * handle)
         return;
     }
     sprintf(newfile,"%s/%s",DEST_DIR,op->operand);
-    out = open(newfile,O_CREAT | O_WRONLY | O_CONCURRENT_WRITE);
+    out = open(newfile,_OPEN_FLAGS);
     if(!out)
     {
         LOG(DCOPY_LOG_WARN,"Warning: file (%s) doesn't have attributes set.",newfile);
@@ -307,7 +317,7 @@ do_splice_copy(operation_t * op, CIRCLE_handle * handle)
     close(out);
     return;
 }
-
+#endif
 
 void
 do_copy(operation_t * op, CIRCLE_handle * handle)
@@ -328,7 +338,7 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
         return;
     }
     sprintf(newfile,"%s/%s",DEST_DIR,op->operand);
-    out = open(newfile,O_CREAT | O_WRONLY | O_CONCURRENT_WRITE);
+    out = open(newfile,_OPEN_FLAGS);
     if(!out)
     {
         LOG(DCOPY_LOG_WARN,"Warning: file (%s) doesn't have attributes set.",newfile);
@@ -398,7 +408,7 @@ add_objects(CIRCLE_handle *handle)
 void
 process_objects(CIRCLE_handle *handle)
 {
-    char op[2048]; 
+    char op[STRING_SIZE]; 
     /* Pop an item off the queue */ 
     LOG(DCOPY_LOG_DBG, "Popping, queue has %d elements", handle->local_queue_size());
     handle->dequeue(op);
@@ -416,7 +426,7 @@ main (int argc, char **argv)
 {
     int c;
 
-    jump_table[0] = do_splice_copy;
+    jump_table[0] = do_copy;
     jump_table[1] = do_checksum;
     jump_table[2] = do_stat;
     total_bytes_copied = 0.0;
