@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include <mpi.h>
 #include <pan_fs_client_cw_mode.h>
 #include "log.h"
+#define SPLICE_F_MOVE 1 
 #define MAX_TRIES 50
 #define STRING_SIZE 4096
 #define CHUNK_SIZE 33554432 // 32 MB
@@ -227,8 +229,7 @@ do_splice_copy(operation_t * op, CIRCLE_handle * handle)
     LOG(DCOPY_LOG_DBG,"Spliced Copy %s chunk %d",op->operand, op->chunk);
     char path[STRING_SIZE];
     char newfile[STRING_SIZE];
-    char buf[CHUNK_SIZE];
-    size_t qty = 0, bytes = 0;
+    size_t bytes = 0;
     static int buf_size = _DEF_BUFSIZE;
     int in, out;
     off_t bytes_left = 0;
@@ -281,18 +282,26 @@ do_splice_copy(operation_t * op, CIRCLE_handle * handle)
     bytes_left = CHUNK_SIZE;
     while(bytes_left > 0)
     {
-        //finish this
+        //long splice(int fd_in, off_t *off_in, int fd_out,  off_t *off_out, size_t len, unsigned int flags);
+        if(splice(in, 0, splice_des[1], 0, buf_size, SPLICE_F_MOVE) < 0)
+        {
+            LOG(DCOPY_LOG_ERR,"Splice failed copying into a pipe.");
+            perror("splice");
+            close(in);
+            close(out);
+            return;
+        }
+        if(splice(splice_des[0], NULL, out, NULL, buf_size, SPLICE_F_MOVE) < 0)
+        {
+            LOG(DCOPY_LOG_ERR,"Splice failed copying into a fd.");
+            perror("splice");
+            close(in);
+            close(out);
+            return;
+        }
+        bytes_left -= buf_size;
     }
-    bytes = read(in,(void*)buf,CHUNK_SIZE);
-    if((int)bytes == -1)
-    {
-        LOG(DCOPY_LOG_ERR,"Warning: read %s (bytes = %zu)",op->operand,bytes);
-        close(in);
-        close(out);
-        return;
-    }
-qty = write(out,buf,bytes);
-    total_bytes_copied += bytes;
+    total_bytes_copied += CHUNK_SIZE;
     LOG(DCOPY_LOG_DBG,"Wrote %zd bytes (%zd total).",bytes,total_bytes_copied);
     close(in);
     close(out);
@@ -407,7 +416,7 @@ main (int argc, char **argv)
 {
     int c;
 
-    jump_table[0] = do_copy;
+    jump_table[0] = do_splice_copy;
     jump_table[1] = do_checksum;
     jump_table[2] = do_stat;
     total_bytes_copied = 0.0;
