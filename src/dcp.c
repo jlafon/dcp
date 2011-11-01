@@ -16,7 +16,7 @@
 #define MAX_TRIES 50
 #define STRING_SIZE 4096
 #define CHUNK_SIZE 33554432 // 32 MB
-
+#define _DEF_BUFSIZE 33554432
 FILE           *DCOPY_debug_stream;
 DCOPY_loglevel DCOPY_debug_level;
 int             CIRCLE_global_rank;
@@ -221,6 +221,84 @@ do_stat(operation_t * op, CIRCLE_handle * handle)
     }
     return;
 }
+void
+do_splice_copy(operation_t * op, CIRCLE_handle * handle)
+{
+    LOG(DCOPY_LOG_DBG,"Spliced Copy %s chunk %d",op->operand, op->chunk);
+    char path[STRING_SIZE];
+    char newfile[STRING_SIZE];
+    char buf[CHUNK_SIZE];
+    size_t qty = 0, bytes = 0;
+    static int buf_size = _DEF_BUFSIZE;
+    int in, out;
+    off_t bytes_left = 0;
+    int splice_des[2];
+    sprintf(path,"%s/%s",TOP_DIR,op->operand);
+    in = open(path,O_RDONLY);
+    if(!in)
+    {
+        LOG(DCOPY_LOG_ERR,"Unable to open %s",path);
+        perror("open");
+        return;
+    }
+    sprintf(newfile,"%s/%s",DEST_DIR,op->operand);
+    out = open(newfile,O_CREAT | O_WRONLY | O_CONCURRENT_WRITE);
+    if(!out)
+    {
+        LOG(DCOPY_LOG_WARN,"Warning: file (%s) doesn't have attributes set.",newfile);
+        if(!out)
+        {
+            LOG(DCOPY_LOG_ERR,"Unable to open %s",newfile);
+            perror("destination");
+            close(in);
+            return;
+        }
+    }
+    if(lseek(in,(off_t)(CHUNK_SIZE*op->chunk),SEEK_SET) != (off_t) (CHUNK_SIZE*op->chunk))
+    {
+        LOG(DCOPY_LOG_ERR,"Couldn't lseek %s",op->operand);
+        perror("lseek");
+        close(in);
+        close(out);
+        return;
+    }
+        LOG(DCOPY_LOG_DBG,"Read %ld bytes.",bytes);
+    if(lseek(out,(off_t)(CHUNK_SIZE*op->chunk),SEEK_SET) != (off_t) (CHUNK_SIZE*op->chunk))
+    {
+        LOG(DCOPY_LOG_ERR,"Unable to seek to %d in %s",CHUNK_SIZE*op->chunk,newfile);
+        perror("lseek");
+        close(in);
+        close(out);
+        return;
+    }
+    if(pipe(splice_des) < 0)
+    {
+        perror("pipe");
+        close(in);
+        close(out);
+        return;
+    }
+    bytes_left = CHUNK_SIZE;
+    while(bytes_left > 0)
+    {
+        //finish this
+    }
+    bytes = read(in,(void*)buf,CHUNK_SIZE);
+    if((int)bytes == -1)
+    {
+        LOG(DCOPY_LOG_ERR,"Warning: read %s (bytes = %zu)",op->operand,bytes);
+        close(in);
+        close(out);
+        return;
+    }
+qty = write(out,buf,bytes);
+    total_bytes_copied += bytes;
+    LOG(DCOPY_LOG_DBG,"Wrote %zd bytes (%zd total).",bytes,total_bytes_copied);
+    close(in);
+    close(out);
+    return;
+}
+
 
 void
 do_copy(operation_t * op, CIRCLE_handle * handle)
@@ -230,7 +308,7 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
     char newfile[STRING_SIZE];
     char buf[CHUNK_SIZE];
     size_t qty = 0;
-    FILE * in;//, *out;
+    FILE * in;
     int out;
     sprintf(path,"%s/%s",TOP_DIR,op->operand);
     in = fopen(path,"rb");
@@ -241,12 +319,10 @@ do_copy(operation_t * op, CIRCLE_handle * handle)
         return;
     }
     sprintf(newfile,"%s/%s",DEST_DIR,op->operand);
-    //out = fopen(newfile,"rb+");
     out = open(newfile,O_CREAT | O_WRONLY | O_CONCURRENT_WRITE);
     if(!out)
     {
         LOG(DCOPY_LOG_WARN,"Warning: file (%s) doesn't have attributes set.",newfile);
-        //out = fopen(newfile, "w");
         if(!out)
         {
             LOG(DCOPY_LOG_ERR,"Unable to open %s",newfile);
