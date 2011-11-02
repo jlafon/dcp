@@ -453,7 +453,7 @@ main (int argc, char **argv)
                 break;
 
             case '?':
-                if (optopt == 'l')
+                if (optopt == 'l' || optopt == 'd' || optopt == 's')
                 {
                     fprintf(stderr, "Option -%c requires an argument.\n", optopt);
                     exit(EXIT_FAILURE);
@@ -475,11 +475,15 @@ main (int argc, char **argv)
                 abort();
         }
     }
-    if((TOP_DIR == NULL || DEST_DIR == NULL) && CIRCLE_global_rank == 0)
+    char * real_src_path = (char*) malloc(sizeof(char)*STRING_SIZE);
+    char * real_dst_path = (char*) malloc(sizeof(char)*STRING_SIZE);
+    if((TOP_DIR == NULL || DEST_DIR == NULL) && CIRCLE_global_rank == 0 || strcmp(realpath(TOP_DIR,real_src_path),realpath(DEST_DIR,real_dst_path)) == 0)
     {
-        LOG(DCOPY_LOG_ERR,"You must specify a source and destination path.");
+        LOG(DCOPY_LOG_ERR,"You must specify a source and destination path that are distinct.");
         exit(1);
     }
+    free(real_src_path);
+    free(real_dst_path);
     time(&time_started);
     CIRCLE_cb_create(&add_objects);
     CIRCLE_cb_process(&process_objects);
